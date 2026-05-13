@@ -407,6 +407,39 @@ def build_matches(candidates_df: pd.DataFrame, jobs: list[dict[str, Any]], bundl
         top_jobs = scored_jobs[:bundle_size]
         match_rows.extend(top_jobs)
 
+        best_job = top_jobs[0] if top_jobs else None
+        alternative_jobs = top_jobs[1:3]
+        experience_text = sanitize_excel_text(str(candidate.get("experience", "")).strip())
+        intro_line = (
+            f"Hi, based on your {experience_text} background, this looked like a strong match:"
+            if experience_text
+            else "Hi, based on your background, this looked like a strong match:"
+        )
+        best_reason = best_job["match_reasons"] if best_job and best_job.get("match_reasons") else "your public post and listed skills looked aligned."
+
+        message_lines = [
+            intro_line,
+            "",
+        ]
+        if best_job:
+            message_lines.extend(
+                [
+                    f"{best_job['job_name']} - {best_job['apply_url']}",
+                    "",
+                    f"The reason I thought it could fit is {best_reason}.",
+                    "",
+                ]
+            )
+
+        if alternative_jobs:
+            message_lines.append("A couple of related options:")
+            for job in alternative_jobs:
+                message_lines.append(f"{job['job_name']} - {job['apply_url']}")
+            message_lines.append("")
+
+        message_lines.append("Hope one of these is useful.")
+        suggested_message = sanitize_excel_text("\n".join(message_lines))
+
         bundle_links = "\n".join(
             sanitize_excel_text(f"{index + 1}. {job['job_name']} - {job['apply_url']}")
             for index, job in enumerate(top_jobs)
@@ -418,6 +451,7 @@ def build_matches(candidates_df: pd.DataFrame, jobs: list[dict[str, Any]], bundl
             "Experience": sanitize_excel_text(str(candidate.get("experience", ""))),
             "URL da postagem": sanitize_excel_text(str(candidate.get("url", ""))),
             "Link dos bundles": bundle_links,
+            "Mensagem sugerida": suggested_message,
         }
 
         if top_jobs:
