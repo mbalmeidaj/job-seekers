@@ -37,9 +37,15 @@ REDDIT_SEARCH_QUERIES = [
     "procurando emprego",
     "procuro emprego",
     "buscando vaga",
+    "arrumar emprego",
+    "recolocacao",
+    "desempregado",
+    "fui demitido",
     "open to work",
     "looking for a job",
     "looking for work",
+    "need a job",
+    "laid off",
     "available for hire",
 ]
 
@@ -69,7 +75,16 @@ SEEKER_KEYWORDS_PT = [
     "estou procurando emprego",
     "estou procurando trabalho",
     "estou em busca de uma vaga",
+    "to procurando emprego",
+    "to procurando vaga",
+    "arrumar emprego",
+    "achar emprego",
+    "conseguir emprego",
+    "conseguir uma vaga",
+    "buscar trabalho",
     "buscando recolocacao",
+    "recolocacao",
+    "realocacao",
     "disponivel para trabalhar",
     "disponivel para freelas",
     "disponivel para trabalho",
@@ -78,6 +93,9 @@ SEEKER_KEYWORDS_PT = [
     "preciso de emprego",
     "preciso trabalhar",
     "desempregado",
+    "sem emprego",
+    "fui demitido",
+    "fui demitida",
 ]
 
 SEEKER_KEYWORDS_EN = [
@@ -99,6 +117,10 @@ SEEKER_KEYWORDS_EN = [
     "actively job hunting",
     "job hunting",
     "need a job",
+    "need work",
+    "unemployed",
+    "between jobs",
+    "laid off",
     "laid off and looking",
 ]
 
@@ -133,6 +155,16 @@ HARD_RECRUITER_SIGNALS = {
 }
 
 ALL_SEEKER_KEYWORDS = SEEKER_KEYWORDS_PT + SEEKER_KEYWORDS_EN
+SEEKER_REGEX_PATTERNS = [
+    (
+        "job-search intent pattern",
+        re.compile(r"\b(arrumar|achar|conseguir|buscar|procurar)\b.{0,40}\b(emprego|vaga|trampo|trabalho)\b"),
+    ),
+    (
+        "unemployment pattern",
+        re.compile(r"\b(desempregado|sem emprego|fui demitid[oa]|laid off|unemployed|between jobs)\b"),
+    ),
+]
 OUTPUT_COLUMNS = [
     "source",
     "forum",
@@ -211,6 +243,15 @@ def find_matches(text: str | None, candidates: list[str]) -> list[str]:
     return matches
 
 
+def find_regex_matches(text: str | None) -> list[str]:
+    normalized_text = normalize_text(text)
+    matches: list[str] = []
+    for label, pattern in SEEKER_REGEX_PATTERNS:
+        if pattern.search(normalized_text):
+            matches.append(label)
+    return matches
+
+
 def parse_iso_date(value: str | None) -> str:
     if not value:
         return ""
@@ -286,8 +327,13 @@ def should_include_item(
 ) -> tuple[bool, list[str], list[str]]:
     full_text = " ".join(part for part in [title, content] if part).strip()
     seeker_matches = find_matches(full_text, ALL_SEEKER_KEYWORDS)
+    regex_matches = find_regex_matches(full_text)
     recruiter_matches = find_matches(full_text, RECRUITER_SIGNALS)
     combined_keywords = seeker_matches[:]
+
+    for regex_match in regex_matches:
+        if regex_match not in combined_keywords:
+            combined_keywords.append(regex_match)
 
     if context_keywords:
         for keyword in context_keywords:
@@ -299,9 +345,9 @@ def should_include_item(
 
     if recruiter_matches:
         hard_matches = [signal for signal in recruiter_matches if signal in HARD_RECRUITER_SIGNALS]
-        if hard_matches and not seeker_matches:
+        if hard_matches and not seeker_matches and not regex_matches:
             return False, combined_keywords, recruiter_matches
-        if recruiter_matches and not seeker_matches and not ignore_soft_recruiter_signals:
+        if recruiter_matches and not seeker_matches and not regex_matches and not ignore_soft_recruiter_signals:
             return False, combined_keywords, recruiter_matches
 
     return True, combined_keywords, recruiter_matches
@@ -409,7 +455,9 @@ def fetch_reddit_leads() -> list[dict[str, str]]:
     client_id = os.getenv("REDDIT_CLIENT_ID")
     client_secret = os.getenv("REDDIT_CLIENT_SECRET")
     if not client_id or not client_secret:
-        logging.warning("Reddit credentials not found. Skipping Reddit collection.")
+        logging.warning(
+            "Reddit credentials not found. Set REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET to enable Reddit collection."
+        )
         return []
 
     reddit = praw.Reddit(
@@ -424,6 +472,7 @@ def fetch_reddit_leads() -> list[dict[str, str]]:
     for subreddit_name in REDDIT_SUBREDDITS:
         logging.info("Scanning Reddit subreddit: %s", subreddit_name)
         subreddit = reddit.subreddit(subreddit_name)
+        subreddit_matches = 0
 
         for submission in subreddit.new(limit=200):
             title = submission.title or ""
@@ -444,6 +493,7 @@ def fetch_reddit_leads() -> list[dict[str, str]]:
                     keywords_matched=keywords_matched,
                 )
             )
+            subreddit_matches += 1
 
         rate_limit_sleep()
 
@@ -470,6 +520,7 @@ def fetch_reddit_leads() -> list[dict[str, str]]:
                             keywords_matched=keywords_matched,
                         )
                     )
+                    subreddit_matches += 1
             except Exception:
                 logging.exception(
                     "Reddit search failed for r/%s with query %r",
@@ -477,6 +528,8 @@ def fetch_reddit_leads() -> list[dict[str, str]]:
                     query,
                 )
             rate_limit_sleep()
+
+        logging.info("Finished Reddit subreddit: %s (%s matched leads)", subreddit_name, subreddit_matches)
 
     return deduplicate_records(records)
 

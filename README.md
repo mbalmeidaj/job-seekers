@@ -47,6 +47,13 @@ $env:REDDIT_CLIENT_ID="your_client_id"
 $env:REDDIT_CLIENT_SECRET="your_client_secret"
 ```
 
+If you want them to persist across new PowerShell sessions on Windows, use:
+
+```powershell
+setx REDDIT_CLIENT_ID "your_client_id"
+setx REDDIT_CLIENT_SECRET "your_client_secret"
+```
+
 4. Run the scraper.
 
 ```powershell
