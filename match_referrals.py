@@ -26,6 +26,23 @@ DEFAULT_PAGE_SIZE = 100
 DEFAULT_BUNDLE_SIZE = 5
 MICRO1_JOBS_ENDPOINT = "https://prod-api.micro1.ai/api/v1/referral/portal/eligible-jobs"
 
+US_STATE_NAMES = {
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut", "delaware",
+    "florida", "georgia", "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas", "kentucky",
+    "louisiana", "maine", "maryland", "massachusetts", "michigan", "minnesota", "mississippi", "missouri",
+    "montana", "nebraska", "nevada", "new hampshire", "new jersey", "new mexico", "new york",
+    "north carolina", "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania", "rhode island",
+    "south carolina", "south dakota", "tennessee", "texas", "utah", "vermont", "virginia", "washington",
+    "west virginia", "wisconsin", "wyoming", "district of columbia",
+}
+
+COUNTRY_NORMALIZATION_MAP = {
+    "england": "United Kingdom",
+    "scotland": "United Kingdom",
+    "wales": "United Kingdom",
+    "northern ireland": "United Kingdom",
+}
+
 LOW_SIGNAL_JOB_SKILLS = {
     "written communication",
     "verbal communication",
@@ -231,6 +248,16 @@ def filter_recent_candidates(candidates_df: pd.DataFrame, lookback_days: int) ->
     return candidates_df[mask].reset_index(drop=True)
 
 
+def normalize_candidate_country(value: str) -> str:
+    cleaned = sanitize_excel_text(str(value).strip())
+    normalized = normalize_text(cleaned)
+    if not normalized:
+        return ""
+    if normalized in US_STATE_NAMES:
+        return "United States"
+    return COUNTRY_NORMALIZATION_MAP.get(normalized, cleaned)
+
+
 def split_items(value: str) -> list[str]:
     if not value:
         return []
@@ -380,24 +407,18 @@ def build_matches(candidates_df: pd.DataFrame, jobs: list[dict[str, Any]], bundl
         top_jobs = scored_jobs[:bundle_size]
         match_rows.extend(top_jobs)
 
+        bundle_links = "\n".join(
+            sanitize_excel_text(f"{index + 1}. {job['job_name']} - {job['apply_url']}")
+            for index, job in enumerate(top_jobs)
+        )
         bundle_row: dict[str, Any] = {
-            "candidate_id": candidate["candidate_id"],
-            "author": sanitize_excel_text(str(candidate.get("author", ""))),
-            "title": sanitize_excel_text(str(candidate.get("title", ""))),
-            "date": sanitize_excel_text(str(candidate.get("date", ""))),
-            "location_country": sanitize_excel_text(str(candidate.get("location_country", ""))),
-            "technologies": sanitize_excel_text(str(candidate.get("technologies", ""))),
-            "experience": sanitize_excel_text(str(candidate.get("experience", ""))),
-            "bundle_size": len(top_jobs),
+            "Date": sanitize_excel_text(str(candidate.get("date", ""))),
+            "Author": sanitize_excel_text(str(candidate.get("author", ""))),
+            "Country": normalize_candidate_country(str(candidate.get("location_country", ""))),
+            "Experience": sanitize_excel_text(str(candidate.get("experience", ""))),
+            "URL da postagem": sanitize_excel_text(str(candidate.get("url", ""))),
+            "Link dos bundles": bundle_links,
         }
-
-        for index in range(bundle_size):
-            job = top_jobs[index] if index < len(top_jobs) else None
-            slot = index + 1
-            bundle_row[f"bundle_{slot}_job_name"] = job["job_name"] if job else ""
-            bundle_row[f"bundle_{slot}_url"] = job["apply_url"] if job else ""
-            bundle_row[f"bundle_{slot}_score"] = job["score"] if job else ""
-            bundle_row[f"bundle_{slot}_reason"] = job["match_reasons"] if job else ""
 
         if top_jobs:
             bundle_rows.append(bundle_row)
