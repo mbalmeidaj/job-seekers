@@ -20,6 +20,7 @@ Running the scraper creates an Excel file named `job_seekers.xlsx` with:
 
 - `Leads`: one consolidated sheet sorted by date descending
 - One sheet per source: `Reddit`, `HackerNews`, `TabNews`, `GUJ`
+- A second-stage matcher can generate `job_referral_matches.xlsx` with candidate-to-job bundles from Micro1 referral opportunities
 
 Every row uses this schema:
 
@@ -60,6 +61,37 @@ setx REDDIT_CLIENT_SECRET "your_client_secret"
 python scraper.py
 ```
 
+## Referral matching
+
+After generating `job_seekers.xlsx`, you can match candidates against recent Micro1 referral jobs and export bundles of up to 5 links per candidate.
+
+Preferred option: set your Micro1 authorization header from a logged-in referral session.
+
+```powershell
+$env:MICRO1_AUTH_TOKEN="your_token_or_bearer_value"
+python match_referrals.py
+```
+
+If you want it to persist across PowerShell sessions:
+
+```powershell
+setx MICRO1_AUTH_TOKEN "your_token_or_bearer_value"
+```
+
+If you already saved the API response to a local JSON file, you can run without live API access:
+
+```powershell
+python match_referrals.py --jobs-json C:\path\to\eligible_jobs.json
+```
+
+The matcher:
+
+- Paginates through the Micro1 `eligible-jobs` endpoint
+- Filters jobs posted in the last 30 days
+- Filters candidates to recent leads as well, using a 30-day lookback by default
+- Focuses on structured Hacker News candidates by default
+- Produces `job_referral_matches.xlsx` with `Candidates`, `Micro1Jobs`, `Matches`, and `Bundles` sheets
+
 ## How to get Reddit API keys
 
 1. Sign in to Reddit.
@@ -77,4 +109,5 @@ python scraper.py
 - Each source runs independently. If one source fails, the others still run.
 - The script sleeps between requests to reduce the chance of rate-limit issues.
 - `location_country`, `technologies`, and `experience` are best-effort structured fields. They are most reliable for Hacker News "Who wants to be hired?" posts that follow a semi-structured format.
+- `match_referrals.py` expects either `MICRO1_AUTH_TOKEN` / `MICRO1_AUTH_HEADER` or a saved `eligible-jobs` JSON payload.
 - The GUJ module first tries `https://www.guj.com.br/c/empregos`. If that category is unavailable, it falls back to the GUJ homepage and scans recent topic links there.
