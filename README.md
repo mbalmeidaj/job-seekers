@@ -23,7 +23,7 @@ Running the scraper creates an Excel file named `job_seekers.xlsx` with:
 
 Every row uses this schema:
 
-`source | forum | author | title | content | url | date | keywords_matched`
+`source | forum | author | title | content | url | date | location_country | technologies | experience | keywords_matched`
 
 ## Setup
 
@@ -76,4 +76,5 @@ python scraper.py
 - The scraper deduplicates leads by URL before export.
 - Each source runs independently. If one source fails, the others still run.
 - The script sleeps between requests to reduce the chance of rate-limit issues.
+- `location_country`, `technologies`, and `experience` are best-effort structured fields. They are most reliable for Hacker News "Who wants to be hired?" posts that follow a semi-structured format.
 - The GUJ module first tries `https://www.guj.com.br/c/empregos`. If that category is unavailable, it falls back to the GUJ homepage and scans recent topic links there.

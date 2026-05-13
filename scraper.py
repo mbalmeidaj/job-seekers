@@ -173,6 +173,9 @@ OUTPUT_COLUMNS = [
     "content",
     "url",
     "date",
+    "location_country",
+    "technologies",
+    "experience",
     "keywords_matched",
 ]
 SOURCE_ORDER = ["Reddit", "HackerNews", "TabNews", "GUJ"]
@@ -191,6 +194,70 @@ TABNEWS_MAX_PAGES = 5
 TABNEWS_PAGE_SIZE = 100
 HN_MAX_PAGES_PER_QUERY = 2
 HN_MONTHLY_THREADS_TO_SCAN = 6
+
+HN_FIELD_NAME_MAP = {
+    "location": "location",
+    "technologies": "technologies",
+    "technology": "technologies",
+    "stack": "technologies",
+    "looking for": "looking_for",
+    "resume/cv": "resume",
+    "resume": "resume",
+    "cv": "resume",
+    "email": "email",
+    "github": "github",
+    "website": "website",
+    "portfolio": "website",
+    "linkedin": "linkedin",
+}
+
+HN_STRUCTURED_LABEL_PATTERN = re.compile(
+    r"(?P<label>Location|Remote|Willing to relocate|Technologies|Technology|Stack|Looking for|R\S*sum\S*\s*/\s*CV|Résumé\s*/\s*CV|Resume\s*/\s*CV|Résumé/CV|Resume/CV|Resume|CV|Email|Github|GitHub|Website|Portfolio|LinkedIn)\s*:\s*",
+    flags=re.IGNORECASE,
+)
+
+COUNTRY_ALIAS_MAP = {
+    "Australia": ["australia", "sydney", "melbourne", "brisbane", "perth"],
+    "Austria": ["austria", "vienna"],
+    "Belgium": ["belgium", "brussels"],
+    "Bulgaria": ["bulgaria", "sofia"],
+    "Brazil": ["brazil", "brasil", "sao paulo", "rio de janeiro", "belo horizonte", "curitiba", "porto alegre"],
+    "Canada": ["canada", "toronto", "vancouver", "montreal", "ottawa", "calgary"],
+    "Denmark": ["denmark", "copenhagen"],
+    "Finland": ["finland", "helsinki"],
+    "France": ["france", "paris", "lyon", "marseille"],
+    "Germany": ["germany", "berlin", "munich", "hamburg", "frankfurt", "cologne"],
+    "India": ["india", "bangalore", "bengaluru", "mumbai", "delhi", "new delhi", "hyderabad", "pune", "chennai"],
+    "Ireland": ["ireland", "dublin", "cork"],
+    "Japan": ["japan", "tokyo", "osaka", "kyoto"],
+    "Mexico": ["mexico", "mexico city", "guadalajara", "monterrey"],
+    "Netherlands": ["netherlands", "amsterdam", "rotterdam", "utrecht", "the hague"],
+    "New Zealand": ["new zealand", "auckland", "wellington"],
+    "Norway": ["norway", "oslo"],
+    "Poland": ["poland", "warsaw", "krakow", "wroclaw"],
+    "Portugal": ["portugal", "lisbon", "porto"],
+    "Singapore": ["singapore"],
+    "Spain": ["spain", "madrid", "barcelona", "valencia"],
+    "Sweden": ["sweden", "stockholm", "gothenburg"],
+    "Switzerland": ["switzerland", "zurich", "geneva"],
+    "United Kingdom": ["united kingdom", "uk", "england", "london", "manchester", "edinburgh", "glasgow", "birmingham"],
+    "United States": ["united states", "usa", "san francisco", "new york", "nyc", "seattle", "austin", "boston", "chicago", "los angeles", "bay area", "atlanta", "miami", "washington dc"],
+}
+
+EXPERIENCE_ROLE_PATTERNS = [
+    ("Product Engineer", ["product engineer"]),
+    ("Data Engineer", ["data engineer", "analytics engineer", "etl engineer", "data platform engineer"]),
+    ("Data Scientist", ["data scientist", "applied scientist", "research scientist"]),
+    ("ML Engineer", ["machine learning engineer", "ml engineer", "ai engineer", "llm engineer", "applied ai engineer"]),
+    ("AI Researcher", ["ai researcher", "research engineer"]),
+    ("Backend Engineer", ["backend engineer", "backend developer", "backend software engineer"]),
+    ("Frontend Engineer", ["frontend engineer", "front-end engineer", "frontend developer", "front end developer", "frontend software engineer"]),
+    ("Full-Stack Engineer", ["full-stack engineer", "full stack engineer", "full-stack developer", "full stack developer", "full-stack", "full stack"]),
+    ("Software Developer", ["software developer", "developer", "software engineer", "swe"]),
+    ("Mobile Engineer", ["mobile engineer", "ios engineer", "android engineer"]),
+    ("DevOps / Platform Engineer", ["devops engineer", "platform engineer", "site reliability engineer", "sre", "cloud engineer", "infra engineer"]),
+    ("Quant / Finance", ["quant", "quantitative", "trading", "finance"]),
+]
 
 
 def configure_logging() -> None:
@@ -227,11 +294,29 @@ def truncate_text(value: str | None, max_length: int = 600) -> str:
     return cleaned[: max_length - 3].rstrip() + "..."
 
 
-def html_to_text(value: str | None) -> str:
+def sanitize_excel_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return re.sub(r"[\x00-\x08\x0B-\x0C\x0E-\x1F]", "", value)
+
+
+def html_to_text(value: str | None, separator: str = " ") -> str:
     if not value:
         return ""
     soup = BeautifulSoup(html.unescape(value), "html.parser")
-    return soup.get_text(" ", strip=True)
+    return soup.get_text(separator, strip=True)
+
+
+def html_to_lines(value: str | None) -> list[str]:
+    if not value:
+        return []
+    raw_text = html_to_text(value, separator="\n")
+    lines: list[str] = []
+    for raw_line in raw_text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if line:
+            lines.append(line)
+    return lines
 
 
 def find_matches(text: str | None, candidates: list[str]) -> list[str]:
@@ -319,6 +404,94 @@ def select_text(*values: str | None) -> str:
     return ""
 
 
+def clean_structured_value(value: str) -> str:
+    value = re.sub(r"\s+", " ", value).strip()
+    value = re.sub(r"\s*,\s*", ", ", value)
+    return value.strip(" ;,")
+
+
+def extract_hn_structured_fields(content: str | None) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    searchable_text = "\n".join(html_to_lines(content))
+    matches = list(HN_STRUCTURED_LABEL_PATTERN.finditer(searchable_text))
+
+    for index, match in enumerate(matches):
+        raw_label = match.group("label")
+        normalized_label = normalize_text(raw_label)
+        field_name = HN_FIELD_NAME_MAP.get(normalized_label)
+        if not field_name:
+            continue
+
+        value_start = match.end()
+        value_end = matches[index + 1].start() if index + 1 < len(matches) else len(searchable_text)
+        raw_value = searchable_text[value_start:value_end]
+        cleaned_value = clean_structured_value(raw_value)
+        if cleaned_value:
+            fields[field_name] = cleaned_value
+
+    return fields
+
+
+def infer_location_country(location_value: str) -> str:
+    normalized_location = normalize_text(location_value)
+    if not normalized_location:
+        return ""
+
+    countries: list[str] = []
+    for country, aliases in COUNTRY_ALIAS_MAP.items():
+        for alias in aliases:
+            normalized_alias = normalize_text(alias)
+            if re.search(rf"\b{re.escape(normalized_alias)}\b", normalized_location):
+                countries.append(country)
+                break
+
+    if re.search(r",\s*[A-Z]{2}\b", location_value) and "United States" not in countries:
+        countries.append("United States")
+
+    if not countries:
+        fragments = [clean_structured_value(fragment) for fragment in location_value.split(",") if clean_structured_value(fragment)]
+        if len(fragments) >= 2:
+            last_fragment = fragments[-1]
+            if re.fullmatch(r"[A-Za-z .'-]{3,}", last_fragment):
+                countries.append(last_fragment)
+
+    return ", ".join(dict.fromkeys(countries))
+
+
+def infer_experience_profile(*text_parts: str) -> str:
+    searchable_text = normalize_text(" ".join(part for part in text_parts if part))
+    if not searchable_text:
+        return ""
+
+    matches: list[str] = []
+    for role_name, patterns in EXPERIENCE_ROLE_PATTERNS:
+        for pattern in patterns:
+            normalized_pattern = normalize_text(pattern)
+            if re.search(rf"\b{re.escape(normalized_pattern)}\b", searchable_text):
+                matches.append(role_name)
+                break
+
+    return ", ".join(dict.fromkeys(matches))
+
+
+def extract_hn_candidate_metadata(title: str, raw_content: str | None, plain_content: str) -> dict[str, str]:
+    structured_fields = extract_hn_structured_fields(raw_content or plain_content)
+    location_country = infer_location_country(structured_fields.get("location", ""))
+    technologies = structured_fields.get("technologies", "")
+    experience = infer_experience_profile(
+        title,
+        plain_content,
+        structured_fields.get("looking_for", ""),
+        technologies,
+    )
+
+    return {
+        "location_country": location_country,
+        "technologies": technologies,
+        "experience": experience,
+    }
+
+
 def should_include_item(
     title: str,
     content: str,
@@ -363,16 +536,22 @@ def build_record(
     url: str,
     date: str,
     keywords_matched: list[str],
+    location_country: str = "",
+    technologies: str = "",
+    experience: str = "",
 ) -> dict[str, str]:
     return {
-        "source": source,
-        "forum": forum,
-        "author": author.strip() if author else "",
-        "title": title.strip() if title else "",
-        "content": truncate_text(content),
-        "url": url.strip(),
-        "date": date,
-        "keywords_matched": ", ".join(dict.fromkeys(keywords_matched)),
+        "source": sanitize_excel_text(source),
+        "forum": sanitize_excel_text(forum),
+        "author": sanitize_excel_text(author.strip() if author else ""),
+        "title": sanitize_excel_text(title.strip() if title else ""),
+        "content": sanitize_excel_text(truncate_text(content)),
+        "url": sanitize_excel_text(url.strip()),
+        "date": sanitize_excel_text(date),
+        "location_country": sanitize_excel_text(location_country.strip()),
+        "technologies": sanitize_excel_text(technologies.strip()),
+        "experience": sanitize_excel_text(experience.strip()),
+        "keywords_matched": sanitize_excel_text(", ".join(dict.fromkeys(keywords_matched))),
     }
 
 
@@ -558,7 +737,8 @@ def fetch_hackernews_leads() -> list[dict[str, str]]:
 
             for hit in hits:
                 title = select_text(hit.get("title"), hit.get("story_title"), "[HN Comment]")
-                content = html_to_text(select_text(hit.get("comment_text"), hit.get("story_text")))
+                raw_content = select_text(hit.get("comment_text"), hit.get("story_text"))
+                content = html_to_text(raw_content)
                 include, keywords_matched, _ = should_include_item(title, content)
                 if not include:
                     continue
@@ -566,6 +746,7 @@ def fetch_hackernews_leads() -> list[dict[str, str]]:
                 item_id = hit.get("objectID") or hit.get("story_id")
                 fallback_url = f"https://news.ycombinator.com/item?id={item_id}" if item_id else ""
                 url = select_text(hit.get("url"), hit.get("story_url"), fallback_url)
+                metadata = extract_hn_candidate_metadata(title, raw_content, content)
 
                 records.append(
                     build_record(
@@ -577,6 +758,9 @@ def fetch_hackernews_leads() -> list[dict[str, str]]:
                         url=url,
                         date=parse_iso_date(hit.get("created_at")),
                         keywords_matched=keywords_matched,
+                        location_country=metadata["location_country"],
+                        technologies=metadata["technologies"],
+                        experience=metadata["experience"],
                     )
                 )
 
@@ -615,7 +799,8 @@ def fetch_hackernews_leads() -> list[dict[str, str]]:
             if str(comment.get("parent_id")) != str(comment.get("story_id")):
                 continue
 
-            content = html_to_text(comment.get("comment_text"))
+            raw_content = comment.get("comment_text")
+            content = html_to_text(raw_content)
             title = thread.get("title") or "Ask HN: Who wants to be hired?"
             include, keywords_matched, recruiter_matches = should_include_item(
                 title,
@@ -628,6 +813,8 @@ def fetch_hackernews_leads() -> list[dict[str, str]]:
             if any(match in HARD_RECRUITER_SIGNALS for match in recruiter_matches):
                 continue
 
+            metadata = extract_hn_candidate_metadata(title, raw_content, content)
+
             records.append(
                 build_record(
                     source="HackerNews",
@@ -638,6 +825,9 @@ def fetch_hackernews_leads() -> list[dict[str, str]]:
                     url=f"https://news.ycombinator.com/item?id={comment.get('objectID')}",
                     date=parse_iso_date(comment.get("created_at")),
                     keywords_matched=keywords_matched,
+                    location_country=metadata["location_country"],
+                    technologies=metadata["technologies"],
+                    experience=metadata["experience"],
                 )
             )
 
