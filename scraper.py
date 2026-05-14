@@ -9,7 +9,7 @@ import random
 import re
 import time
 import unicodedata
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urljoin
 
@@ -194,6 +194,7 @@ TABNEWS_MAX_PAGES = 5
 TABNEWS_PAGE_SIZE = 100
 HN_MAX_PAGES_PER_QUERY = 2
 HN_MONTHLY_THREADS_TO_SCAN = 6
+HN_RECENT_LOOKBACK_DAYS = 45
 
 HN_FIELD_NAME_MAP = {
     "location": "location",
@@ -345,6 +346,19 @@ def parse_iso_date(value: str | None) -> str:
         return datetime.fromisoformat(normalized).date().isoformat()
     except ValueError:
         return ""
+
+
+def parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def parse_timestamp_date(timestamp: float | int | None) -> str:
@@ -716,8 +730,12 @@ def fetch_reddit_leads() -> list[dict[str, str]]:
 def fetch_hackernews_leads() -> list[dict[str, str]]:
     session = build_session()
     records: list[dict[str, str]] = []
+    recent_cutoff = datetime.now(UTC) - timedelta(days=HN_RECENT_LOOKBACK_DAYS)
 
-    logging.info("Scanning Hacker News keyword matches via Algolia API")
+    logging.info(
+        "Scanning Hacker News keyword matches via Algolia API (recent window: last %s days)",
+        HN_RECENT_LOOKBACK_DAYS,
+    )
     for query in HN_SEARCH_QUERIES:
         for page in range(HN_MAX_PAGES_PER_QUERY):
             payload = request_json(
@@ -735,7 +753,12 @@ def fetch_hackernews_leads() -> list[dict[str, str]]:
             if not hits:
                 break
 
+            hit_timestamps = [parse_iso_datetime(hit.get("created_at")) for hit in hits]
             for hit in hits:
+                created_at = parse_iso_datetime(hit.get("created_at"))
+                if created_at and created_at < recent_cutoff:
+                    continue
+
                 title = select_text(hit.get("title"), hit.get("story_title"), "[HN Comment]")
                 raw_content = select_text(hit.get("comment_text"), hit.get("story_text"))
                 content = html_to_text(raw_content)
@@ -763,6 +786,10 @@ def fetch_hackernews_leads() -> list[dict[str, str]]:
                         experience=metadata["experience"],
                     )
                 )
+
+            oldest_hit = min((timestamp for timestamp in hit_timestamps if timestamp), default=None)
+            if oldest_hit and oldest_hit < recent_cutoff:
+                break
 
     logging.info('Scanning Hacker News "Who wants to be hired?" monthly threads')
     thread_payload = request_json(
@@ -797,6 +824,9 @@ def fetch_hackernews_leads() -> list[dict[str, str]]:
 
         for comment in comments_payload.get("hits", []):
             if str(comment.get("parent_id")) != str(comment.get("story_id")):
+                continue
+            created_at = parse_iso_datetime(comment.get("created_at"))
+            if created_at and created_at < recent_cutoff:
                 continue
 
             raw_content = comment.get("comment_text")

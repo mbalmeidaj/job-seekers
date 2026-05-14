@@ -21,7 +21,8 @@ from scraper import auto_adjust_column_widths, normalize_text, sanitize_excel_te
 INPUT_FILE = "job_seekers.xlsx"
 OUTPUT_FILE = "job_referral_matches.xlsx"
 DEFAULT_SHEET_NAME = "HackerNews"
-DEFAULT_LOOKBACK_DAYS = 30
+DEFAULT_JOB_LOOKBACK_DAYS = 30
+DEFAULT_CANDIDATE_LOOKBACK_DAYS = 14
 DEFAULT_PAGE_SIZE = 100
 DEFAULT_BUNDLE_SIZE = 5
 MICRO1_JOBS_ENDPOINT = "https://prod-api.micro1.ai/api/v1/referral/portal/eligible-jobs"
@@ -41,6 +42,31 @@ COUNTRY_NORMALIZATION_MAP = {
     "scotland": "United Kingdom",
     "wales": "United Kingdom",
     "northern ireland": "United Kingdom",
+}
+
+TECH_DISPLAY_MAP = {
+    "aws": "AWS",
+    "css": "CSS",
+    "docker": "Docker",
+    "fastapi": "FastAPI",
+    "figma": "Figma",
+    "go": "Go",
+    "html": "HTML",
+    "ios": "iOS",
+    "java": "Java",
+    "javascript": "JavaScript",
+    "kotlin": "Kotlin",
+    "llm": "LLM",
+    "node": "Node",
+    "postgres": "Postgres",
+    "pytorch": "PyTorch",
+    "python": "Python",
+    "react": "React",
+    "sql": "SQL",
+    "swift": "Swift",
+    "typescript": "TypeScript",
+    "ui": "UI",
+    "ux": "UX",
 }
 
 LOW_SIGNAL_JOB_SKILLS = {
@@ -87,11 +113,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", default=INPUT_FILE, help="Input workbook with scraped job seekers.")
     parser.add_argument("--output", default=OUTPUT_FILE, help="Output workbook for referral bundles.")
     parser.add_argument("--sheet", default=DEFAULT_SHEET_NAME, help="Workbook sheet to use as candidate source.")
-    parser.add_argument("--lookback-days", type=int, default=DEFAULT_LOOKBACK_DAYS, help="Only keep jobs posted within this many days.")
+    parser.add_argument("--lookback-days", type=int, default=DEFAULT_JOB_LOOKBACK_DAYS, help="Only keep jobs posted within this many days.")
     parser.add_argument(
         "--candidate-lookback-days",
         type=int,
-        default=DEFAULT_LOOKBACK_DAYS,
+        default=DEFAULT_CANDIDATE_LOOKBACK_DAYS,
         help="Only keep candidates whose lead date is within this many days.",
     )
     parser.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE, help="Micro1 API page size.")
@@ -225,14 +251,19 @@ def load_candidates(input_path: str, sheet_name: str) -> pd.DataFrame:
         mask = (dataframe["experience"].astype(str).str.strip() != "") | (dataframe["technologies"].astype(str).str.strip() != "")
         dataframe = dataframe[mask]
     dataframe = dataframe.copy()
+    dataframe["candidate_date"] = pd.to_datetime(dataframe.get("date", ""), errors="coerce")
     dataframe["candidate_richness"] = (
         dataframe.get("experience", "").astype(str).str.len()
         + dataframe.get("technologies", "").astype(str).str.len()
         + dataframe.get("content", "").astype(str).str.len()
     )
     if "author" in dataframe.columns:
-        dataframe = dataframe.sort_values("candidate_richness", ascending=False).drop_duplicates(subset=["author"], keep="first")
-    dataframe = dataframe.drop(columns=["candidate_richness"])
+        dataframe = dataframe.sort_values(
+            ["candidate_date", "candidate_richness"],
+            ascending=[False, False],
+            na_position="last",
+        ).drop_duplicates(subset=["author"], keep="first")
+    dataframe = dataframe.drop(columns=["candidate_date", "candidate_richness"])
     dataframe = dataframe.reset_index(drop=True)
     dataframe.insert(0, "candidate_id", [f"CAND-{index + 1:04d}" for index in dataframe.index])
     return dataframe
@@ -245,7 +276,10 @@ def filter_recent_candidates(candidates_df: pd.DataFrame, lookback_days: int) ->
     cutoff = datetime.now().date() - timedelta(days=lookback_days)
     candidate_dates = pd.to_datetime(candidates_df["date"], errors="coerce").dt.date
     mask = candidate_dates.notna() & (candidate_dates >= cutoff)
-    return candidates_df[mask].reset_index(drop=True)
+    filtered = candidates_df[mask].sort_values("date", ascending=False).reset_index(drop=True)
+    if "candidate_id" in filtered.columns:
+        filtered["candidate_id"] = [f"CAND-{index + 1:04d}" for index in filtered.index]
+    return filtered
 
 
 def normalize_candidate_country(value: str) -> str:
@@ -306,6 +340,71 @@ def phrase_in_text(phrase: str, text: str) -> bool:
     if not normalized_phrase or not normalized_text:
         return False
     return re.search(rf"(?<!\w){re.escape(normalized_phrase)}(?!\w)", normalized_text) is not None
+
+
+def obfuscate_url(url: str) -> str:
+    cleaned = sanitize_excel_text(url.strip())
+    if not cleaned:
+        return ""
+    obfuscated = cleaned.replace("https://", "http s: //").replace("http://", "http: //")
+    obfuscated = obfuscated.replace(".", " . ")
+    obfuscated = obfuscated.replace("?", " ?")
+    obfuscated = obfuscated.replace("&", " &")
+    return re.sub(r"\s+", " ", obfuscated).strip()
+
+
+def summarize_match_reason(candidate: pd.Series, job: dict[str, Any], reasons_text: str) -> str:
+    normalized_reasons = normalize_text(reasons_text)
+    experience_text = sanitize_excel_text(str(candidate.get("experience", "")).strip())
+
+    if "role overlap" in normalized_reasons and "tech overlap" in normalized_reasons:
+        if experience_text:
+            return f"It looked like the closest match because both the role focus and the stack line up well with your {experience_text} background."
+        return "It looked like the closest match because both the role focus and the stack line up well with what you described."
+    if "tech overlap" in normalized_reasons:
+        return "It stood out mainly because the stack lines up with the technologies mentioned in your post."
+    if "role overlap" in normalized_reasons:
+        return "It stood out mainly because the role focus lines up with the experience described in your post."
+    if "skill overlap" in normalized_reasons:
+        return "It looked relevant because several of the listed skills overlap with what you shared publicly."
+    return f"It looked like the closest match to the role and skill signals in the {sanitize_excel_text(job['job_name'])} bundle."
+
+
+def get_job_skill_values(job: dict[str, Any]) -> list[str]:
+    raw_skills = job.get("skills")
+    if isinstance(raw_skills, list):
+        return [sanitize_excel_text(str(skill)) for skill in raw_skills if str(skill).strip()]
+    return split_items(sanitize_excel_text(str(job.get("skills_text", ""))))
+
+
+def extract_job_focus_label(candidate: pd.Series, job: dict[str, Any]) -> str:
+    job_text = " ".join([job["job_name"], " ".join(get_job_skill_values(job))])
+    parenthetical_match = re.search(r"\(([^)]+)\)", job["job_name"])
+    if parenthetical_match:
+        label = sanitize_excel_text(parenthetical_match.group(1))
+        label = re.sub(r"\s*[\+/]\s*", " and ", label)
+        return label
+
+    focus_terms: list[str] = []
+    for tech in candidate_tech_keywords(str(candidate.get("technologies", ""))):
+        if tech in TECH_DISPLAY_MAP and phrase_in_text(tech, job_text):
+            display_value = TECH_DISPLAY_MAP[tech]
+            if display_value not in focus_terms:
+                focus_terms.append(display_value)
+
+    if len(focus_terms) >= 2:
+        return " and ".join(focus_terms[:2])
+
+    return sanitize_excel_text(job["job_name"])
+
+
+def summarize_alternative_jobs(alternative_jobs: list[dict[str, Any]]) -> str:
+    titles = [sanitize_excel_text(job["job_name"]) for job in alternative_jobs if job.get("job_name")]
+    if not titles:
+        return ""
+    if len(titles) == 1:
+        return f"There is also a related role on the same job board: {titles[0]}."
+    return f"There are also a couple of related roles on the same job board, including {titles[0]} and {titles[1]}."
 
 
 def score_job_for_candidate(candidate: pd.Series, job: dict[str, Any]) -> tuple[float, list[str]]:
@@ -411,37 +510,46 @@ def build_matches(candidates_df: pd.DataFrame, jobs: list[dict[str, Any]], bundl
         alternative_jobs = top_jobs[1:3]
         experience_text = sanitize_excel_text(str(candidate.get("experience", "")).strip())
         intro_line = (
-            f"Hi, based on your {experience_text} background, this looked like a strong match:"
-            if experience_text
-            else "Hi, based on your background, this looked like a strong match:"
+            f"Based on your {experience_text} background, one role that seemed especially relevant was {best_job['job_name']}."
+            if best_job and experience_text
+            else f"Based on your background, one role that seemed especially relevant was {best_job['job_name']}."
+            if best_job
+            else "Based on your background, I found a few roles that looked relevant."
         )
-        best_reason = best_job["match_reasons"] if best_job and best_job.get("match_reasons") else "your public post and listed skills looked aligned."
+        best_reason = (
+            summarize_match_reason(candidate, best_job, best_job["match_reasons"])
+            if best_job and best_job.get("match_reasons")
+            else "It looked like the closest match to the role and stack signals in your bundle."
+        )
+        alternatives_summary = summarize_alternative_jobs(alternative_jobs)
+        best_focus_label = extract_job_focus_label(candidate, best_job) if best_job else ""
+        recommendation_line = (
+            f"I would start with the {best_focus_label} one and tailor the application to that specific stack rather than applying broadly."
+            if best_job and best_focus_label and normalize_text(best_focus_label) != normalize_text(best_job["job_name"])
+            else f"I would start with the {best_job['job_name']} one and tailor the application to that specific role rather than applying broadly."
+            if best_job
+            else ""
+        )
 
         message_lines = [
             intro_line,
-            "",
+            best_reason,
         ]
+        if alternatives_summary:
+            message_lines.extend(["", alternatives_summary])
+        if recommendation_line:
+            message_lines.extend(["", recommendation_line])
         if best_job:
             message_lines.extend(
                 [
-                    f"{best_job['job_name']} - {best_job['apply_url']}",
                     "",
-                    f"The reason I thought it could fit is {best_reason}.",
-                    "",
+                    f"You also could try this (remove the spaces) {obfuscate_url(best_job['apply_url'])}",
                 ]
             )
-
-        if alternative_jobs:
-            message_lines.append("A couple of related options:")
-            for job in alternative_jobs:
-                message_lines.append(f"{job['job_name']} - {job['apply_url']}")
-            message_lines.append("")
-
-        message_lines.append("Hope one of these is useful.")
         suggested_message = sanitize_excel_text("\n".join(message_lines))
 
         bundle_links = "\n".join(
-            sanitize_excel_text(f"{index + 1}. {job['job_name']} - {job['apply_url']}")
+            sanitize_excel_text(f"{index + 1}. {job['job_name']} - {obfuscate_url(job['apply_url'])}")
             for index, job in enumerate(top_jobs)
         )
         bundle_row: dict[str, Any] = {

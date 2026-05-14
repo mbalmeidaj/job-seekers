@@ -88,8 +88,10 @@ The matcher:
 
 - Paginates through the Micro1 `eligible-jobs` endpoint
 - Filters jobs posted in the last 30 days
-- Filters candidates to recent leads as well, using a 30-day lookback by default
+- Filters candidates to recent leads as well, using a 14-day lookback by default
 - Focuses on structured Hacker News candidates by default
+- Prioritizes the most recent post per Hacker News author before deduplicating
+- Formats referral URLs with spaces so they are easier to paste into manual outreach without triggering direct-link detection
 - Produces `job_referral_matches.xlsx` with `Candidates`, `Micro1Jobs`, `Matches`, and `Bundles` sheets
 
 ## How to get Reddit API keys
@@ -108,6 +110,7 @@ The matcher:
 - The scraper deduplicates leads by URL before export.
 - Each source runs independently. If one source fails, the others still run.
 - The script sleeps between requests to reduce the chance of rate-limit issues.
+- Hacker News collection now prioritizes a recent 45-day window so the candidate pool stays fresher by default.
 - `location_country`, `technologies`, and `experience` are best-effort structured fields. They are most reliable for Hacker News "Who wants to be hired?" posts that follow a semi-structured format.
 - `match_referrals.py` expects either `MICRO1_AUTH_TOKEN` / `MICRO1_AUTH_HEADER` or a saved `eligible-jobs` JSON payload.
 - The GUJ module first tries `https://www.guj.com.br/c/empregos`. If that category is unavailable, it falls back to the GUJ homepage and scans recent topic links there.
